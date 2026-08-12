@@ -5,3 +5,8 @@ input/*
 !input/.gitkeep
 __pycache__/
 *.pyc
+
+# Ключи и секреты — в репозиторий не попадают никогда
+.env
+.env.*
+!.env.example
