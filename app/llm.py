@@ -22,14 +22,16 @@ ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "work" / "llm_cache"
 
 BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL_MAIN = "qwen/qwen3.7-plus"      # основное чтение
-MODEL_STRONG = "qwen/qwen3.8-max"     # перепроверка сомнительных позиций
+
+# Одна модель на весь проект. Дорогая max не используется: на перепроверке
+# сомнительных позиций она вчетверо поднимала стоимость чертежа, ничего
+# принципиально не добавляя — сомнительное всё равно смотрит человек.
+MODEL_MAIN = os.environ.get("OPENROUTER_MODEL", "").strip() or "qwen/qwen3.7-plus"
 
 # Цены OpenRouter, $ за миллион токенов. Нужны только для отчёта пользователю,
 # поэтому расхождение с реальным счётом на копейки некритично.
 PRICES = {
-    MODEL_MAIN: (0.32, 1.28),
-    MODEL_STRONG: (2.00, 6.00),
+    "qwen/qwen3.7-plus": (0.32, 1.28),
     "qwen/qwen3.7-flash": (0.03, 0.13),
 }
 

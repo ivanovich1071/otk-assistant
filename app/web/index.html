@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Ассистент ОТК</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="toolbar">
+  <input type="file" id="file"
+         accept=".pdf,.png,.jpg,.jpeg,.jpe,.tif,.tiff,.bmp,.webp,.gif"
+         hidden>
+  <button id="pick">Выбрать чертёж…</button>
+  <span id="filename" class="dim">файл не выбран</span>
+  <span class="sep"></span>
+  <label for="mode">Режим:</label>
+  <select id="mode">
+    <option value="tz">Требования по изготовлению</option>
+    <option value="karta">Карта обмера</option>
+  </select>
+  <button id="start" disabled>Обработать</button>
+  <span class="sep"></span>
+  <button id="restart" disabled>Повторить</button>
+  <button id="remove" disabled>Удалить</button>
+  <button id="clear">Очистить список</button>
+  <span class="grow"></span>
+  <span id="key" class="dim"></span>
+</div>
+
+<div id="body">
+  <div id="left">
+    <div class="caption">Задания</div>
+    <table id="joblist">
+      <thead><tr><th style="width:46%">Чертёж</th><th style="width:22%">Режим</th><th style="width:18%">Состояние</th><th>Время</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="empty" class="hint">Заданий пока нет.<br>Выберите чертёж и нажмите «Обработать».</div>
+  </div>
+
+  <div id="splitter"></div>
+
+  <div id="right">
+    <div id="detail" class="hint">Выберите задание в списке слева.</div>
+
+    <div id="card" hidden>
+      <div id="tabs">
+        <button class="tab act" data-tab="job">Задание</button>
+        <button class="tab" data-tab="draw">Чертёж</button>
+        <button class="tab" data-tab="table">Карта обмера</button>
+        <button class="tab" data-tab="files">Файлы</button>
+      </div>
+
+      <div class="pane" id="pane-job">
+        <div class="caption" id="title"></div>
+        <div class="grid" id="props"></div>
+        <div class="caption">Стадии</div>
+        <table id="stages">
+          <thead><tr><th style="width:34%">Стадия</th><th style="width:14%">Состояние</th><th style="width:42%">Результат</th><th>Время</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="caption">Замечания</div>
+        <ul id="warnings" class="warn"></ul>
+      </div>
+
+      <div class="pane" id="pane-draw" hidden>
+        <div id="drawbar">
+          <button id="zoom-out">−</button>
+          <button id="zoom-in">+</button>
+          <button id="zoom-fit">По ширине</button>
+          <button id="zoom-1">100 %</button>
+          <span id="zoom-label" class="dim"></span>
+          <span class="grow"></span>
+          <span class="dim">тянуть мышью — панорама</span>
+        </div>
+        <div id="viewport"><img id="drawing" alt="размеченный чертёж"></div>
+        <div id="draw-none" class="hint" hidden>Размеченного чертежа ещё нет.</div>
+      </div>
+
+      <div class="pane" id="pane-table" hidden>
+        <div id="tablebar">
+          <button id="save" disabled>Сохранить правки</button>
+          <button id="rebuild" disabled>Пересобрать чертёж и карту</button>
+          <span id="edited" class="dim"></span>
+        </div>
+        <div id="editor"></div>
+        <div id="table-none" class="hint" hidden>Разметки ещё нет — она появляется после стадии чтения.</div>
+      </div>
+
+      <div class="pane" id="pane-files" hidden>
+        <div class="caption">Папка для сохранения</div>
+        <div id="folderbar">
+          <input type="text" id="folder" spellcheck="false">
+          <button id="browse">Обзор…</button>
+          <button id="folder-save">Применить</button>
+          <button id="export">Сохранить сюда файлы задания</button>
+        </div>
+        <div id="folder-hint" class="dim"></div>
+
+        <div class="caption">Готовые файлы</div>
+        <table id="files">
+          <thead><tr><th style="width:64%">Файл</th><th>Действия</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="status">
+  <span id="stat-jobs">заданий: 0</span>
+  <span class="sep"></span>
+  <span id="stat-time"></span>
+  <span class="sep"></span>
+  <span id="stat-out"></span>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
