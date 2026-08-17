@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -18,6 +20,31 @@ JOBS_DIR = ROOT / "work" / "jobs"
 MODES = {"karta": "Карта обмера", "tz": "Требования по изготовлению"}
 STATUS = {"queued": "в очереди", "running": "выполняется",
           "done": "готово", "failed": "ошибка"}
+
+# Обработчик пишет журнал стадий, а интерфейс опрашивает его раз в секунду —
+# оба в одном процессе. Без замка читатель успевал попасть между обрезкой файла
+# и записью и падал на пустом JSON.
+_lock = threading.RLock()
+
+
+def _write_json(path: Path, data: dict) -> None:
+    """Запись через временный файл, с оглядкой на Windows.
+
+    `os.replace` здесь атомарна, но падает с WinError 5, если файл в этот момент
+    кто-то держит открытым — обычно антивирус. Тогда после нескольких попыток
+    пишем напрямую: под замком читателей из приложения всё равно нет.
+    """
+    text = json.dumps(data, ensure_ascii=False, indent=1)
+    tmp = path.parent / (path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    for _ in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    path.write_text(text, encoding="utf-8")
+    tmp.unlink(missing_ok=True)
 
 
 @dataclass
@@ -48,9 +75,9 @@ class Job:
         return JOBS_DIR / self.id
 
     def save(self) -> None:
-        self.dir.mkdir(parents=True, exist_ok=True)
-        (self.dir / "job.json").write_text(
-            json.dumps(asdict(self), ensure_ascii=False, indent=1), encoding="utf-8")
+        with _lock:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            _write_json(self.dir / "job.json", asdict(self))
 
     def stage(self, name: str) -> Stage:
         for item in self.stages:
@@ -105,9 +132,14 @@ def load(job_id: str) -> Job | None:
     path = JOBS_DIR / job_id / "job.json"
     if not path.exists():
         return None
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    raw["stages"] = [Stage(**s) for s in raw.get("stages", [])]
-    return Job(**raw)
+    with _lock:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["stages"] = [Stage(**s) for s in raw.get("stages", [])]
+            return Job(**raw)
+        except (json.JSONDecodeError, TypeError, OSError):
+            # Битое задание не должно ронять список всех остальных.
+            return None
 
 
 def listing() -> list[Job]:
