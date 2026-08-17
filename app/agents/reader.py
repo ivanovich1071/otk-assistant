@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from app.llm import LLM, LLMError, parse_json
@@ -81,7 +82,8 @@ def _blocks_digest(blocks: list[dict], texts: dict[int, dict]) -> list[dict]:
 
 
 def plan_markup(blocks: list[dict], texts: dict[int, dict],
-                width: int, height: int, text_height: float) -> dict:
+                width: int, height: int, text_height: float,
+                zones: dict | None = None) -> dict:
     """Группы и нумерация считаются кодом.
 
     Просить это у модели одним запросом пробовали: на 117 надписях она израсходовала
@@ -92,7 +94,8 @@ def plan_markup(blocks: list[dict], texts: dict[int, dict],
     sys.path.insert(0, str(ROOT / "tools"))
     import markup_layout                            # noqa: PLC0415
 
-    return markup_layout.build(blocks, texts, width, height, text_height)
+    return markup_layout.build(blocks, texts, width, height, text_height,
+                               zones=zones)
 
 
 def recheck(llm: LLM, markup: dict, image: Path, index: dict[int, dict],
@@ -190,8 +193,21 @@ def run(image: Path, blocks_data: dict, sheets: list[dict], sheets_dir: Path,
     (image.parent / "texts.json").write_text(
         json.dumps(texts, ensure_ascii=False, indent=1), encoding="utf-8")
 
+    zones = None
+    try:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import sheet_zones                          # noqa: PLC0415
+        from detect_text import load_gray           # noqa: PLC0415
+        zones = sheet_zones.analyze(load_gray(image))
+        if progress:
+            progress(f"служебных зон: таблиц {len(zones['tables'])}, "
+                     f"проекций {len(zones['projections'])}")
+    except Exception as error:                      # noqa: BLE001
+        if progress:
+            progress(f"зоны листа не определены ({error}) — отбор по краю листа")
+
     markup = plan_markup(blocks, texts, blocks_data["width"],
-                         blocks_data["height"], blocks_data["text_height"])
+                         blocks_data["height"], blocks_data["text_height"], zones)
     markup["drawing"] = str(image)
     markup["text_height"] = blocks_data["text_height"]
     markup.setdefault("designation", "")

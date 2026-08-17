@@ -22,6 +22,7 @@ import numpy as np
 
 
 PAD = 6            # запас вокруг bbox, чтобы не срезать засечки
+ALONG_PAD = 1.3    # запас вдоль строки в долях кегля — под срезанные Ø, R, M
 SCALE = 3          # апскейл: мелкий шрифт чертежа читается только увеличенным
 CELL_GAP = 10
 LABEL_H = 22
@@ -45,9 +46,20 @@ def save(path: Path, img: np.ndarray) -> None:
 
 def cut(gray: np.ndarray, box: tuple[int, int, int, int], angle: int = 0,
         pad: int = PAD, scale: int = SCALE) -> np.ndarray:
+    """Кроп надписи с запасом вдоль строки.
+
+    Знак Ø — перечёркнутый кружок — не проходит фильтр заливки в `detect_text`
+    и в рамку блока не попадает. Кроп по голой рамке резал его пополам, и модель
+    читала `Ø1200` как `1200`. Поэтому вдоль строки запас больше кегля,
+    а поперёк остаётся прежним, чтобы не втянуть соседнюю надпись.
+    """
     x, y, w, h = box
-    y0, y1 = max(0, y - pad), min(gray.shape[0], y + h + pad)
-    x0, x1 = max(0, x - pad), min(gray.shape[1], x + w + pad)
+    across = w if angle in (90, 270) else h
+    along = max(pad, int(across * ALONG_PAD))
+    pad_y, pad_x = (along, pad) if angle in (90, 270) else (pad, along)
+
+    y0, y1 = max(0, y - pad_y), min(gray.shape[0], y + h + pad_y)
+    x0, x1 = max(0, x - pad_x), min(gray.shape[1], x + w + pad_x)
     piece = gray[y0:y1, x0:x1]
     if angle == 90:
         # На чертежах по ГОСТ повёрнутый текст читается снизу вверх.
