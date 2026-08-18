@@ -187,6 +187,10 @@ def _finish_karta(job: Job, image: Path, markup: dict, blocks: dict) -> None:
     marked.parent.mkdir(parents=True, exist_ok=True)
     import render_numbers                       # noqa: PLC0415
     count = render_numbers.render(image, markup, marked)
+    # Куда сел каждый номер, знает только render_numbers. Без записи обратно
+    # номер нельзя ни подвинуть мышкой, ни перерисовать на прежнем месте.
+    (job.dir / "markup.json").write_text(
+        json.dumps(markup, ensure_ascii=False, indent=1), encoding="utf-8")
     _publish(job, marked)
     job.finish("Нумерация", f"номеров {count}")
 

@@ -23,7 +23,8 @@ from app.llm import LLM, LLMError, parse_json
 ROOT = Path(__file__).resolve().parent.parent.parent
 PROMPTS = ROOT / "app" / "prompts"
 RULES_DIR = ROOT / ".claude" / "rules"
-MARKUP_RULES = ["numbering.md", "glossary.md", "tt-rules.md", "markup-format.md"]
+MARKUP_RULES = ["sheet-zones.md", "numbering.md", "glossary.md", "tt-rules.md",
+                "markup-format.md"]
 
 RECHECK_SCALE = 5          # во сколько раз увеличить кроп при перепроверке
 RECHECK_LIMIT = 12         # больше сомнительных — значит, дело не в отдельных надписях

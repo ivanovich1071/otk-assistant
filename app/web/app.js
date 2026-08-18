@@ -198,13 +198,101 @@ function loadDrawing() {
   } else if (image.naturalWidth) {
     fitWidth();       // ширину окна видно только когда вкладка показана
   }
+  loadPins();
+}
+
+/** Метки номеров нужны и на вкладке чертежа, а разметку грузит вкладка карты. */
+async function loadPins() {
+  if (job.mode !== "karta") return;
+  if (!markup) {
+    try {
+      markup = await api(`/api/jobs/${job.id}/markup`);
+    } catch {
+      return;
+    }
+  }
+  drawPins();
 }
 
 function applyZoom() {
   const image = $("drawing");
   image.style.width = image.naturalWidth * zoom + "px";
   text($("zoom-label"), Math.round(zoom * 100) + " %");
+  placePins();
 }
+
+// ── номера поверх чертежа ─────────────────────────────────────────────────────
+//
+// Номер уже впечатан рендерером в картинку, поэтому метка не рисует его заново,
+// а показывает, куда он переедет после перерисовки. Координаты хранятся
+// в пикселях чертежа, так что зум их не портит: пересчитывается только экран.
+
+function pinned() {
+  if (!markup || !markup.groups) return [];
+  return markup.groups.flatMap((g) => g.items)
+                      .filter((i) => i.label_x !== null && i.label_x !== undefined);
+}
+
+function drawPins() {
+  const host = $("labels");
+  if (!host) return;
+  host.innerHTML = "";
+  for (const item of pinned()) {
+    const pin = document.createElement("div");
+    pin.className = "pin" + (item.confidence === "low" ? " low" : "");
+    pin.textContent = item.no;
+    pin.title = item.value;
+    pin.onmousedown = (event) => startDrag(event, item, pin);
+    host.appendChild(pin);
+    item._pin = pin;
+  }
+  placePins();
+}
+
+function placePins() {
+  for (const item of pinned()) {
+    if (!item._pin) continue;
+    item._pin.style.left = item.label_x * zoom + "px";
+    item._pin.style.top = item.label_y * zoom + "px";
+  }
+}
+
+function startDrag(event, item, pin) {
+  event.preventDefault();
+  event.stopPropagation();          // иначе лист уедет панорамой
+  const fromX = event.clientX, fromY = event.clientY;
+  const baseX = item.label_x, baseY = item.label_y;
+
+  const move = (moved) => {
+    item.label_x = Math.round(baseX + (moved.clientX - fromX) / zoom);
+    item.label_y = Math.round(baseY + (moved.clientY - fromY) / zoom);
+    placePins();
+  };
+  const drop = () => {
+    removeEventListener("mousemove", move);
+    removeEventListener("mouseup", drop);
+    if (item.label_x !== baseX || item.label_y !== baseY) {
+      pin.classList.add("moved");
+      $("labels-save").disabled = false;
+    }
+  };
+  addEventListener("mousemove", move);
+  addEventListener("mouseup", drop);
+}
+
+$("labels-save").onclick = async () => {
+  const data = JSON.parse(JSON.stringify(markup, (key, value) =>
+    key === "_pin" ? undefined : value));
+  await api(`/api/jobs/${job.id}/markup`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  await api(`/api/jobs/${job.id}/rebuild`, { method: "POST" });
+  $("labels-save").disabled = true;
+  $("drawing").dataset.src = "";     // после перерисовки картинку надо перечитать
+  refresh();
+};
 
 function fitWidth() {
   const image = $("drawing");

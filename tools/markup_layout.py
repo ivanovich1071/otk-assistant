@@ -541,12 +541,16 @@ def build(blocks: list[dict], texts: dict[int, dict], width: int, height: int,
             sizes.append(entry)
         elif kind == "caption":
             captions.append(entry)
+            skipped.append({"block": block["id"], "reason": kind})
         elif kind == "tt":
             # Текст абзаца собирается построчно в tech_items; сюда идут только
             # одиночные пункты, не попавшие ни в один абзац.
             if not in_text:
                 tech.append(entry)
-        elif kind != "junk":
+            skipped.append({"block": block["id"], "reason": kind})
+        else:
+            # Пустые блоки тоже записываем: иначе проверка считает их
+            # неразобранными и на скане выдаёт «блоков не разобрано: 943».
             skipped.append({"block": block["id"], "reason": kind})
 
     projections = (zones or {}).get("projections") or []

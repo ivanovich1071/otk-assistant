@@ -71,9 +71,10 @@
           <button id="zoom-1">100 %</button>
           <span id="zoom-label" class="dim"></span>
           <span class="grow"></span>
-          <span class="dim">тянуть мышью — панорама</span>
+          <button id="labels-save" disabled>Сохранить и перерисовать</button>
+          <span class="dim">тянуть номер — переставить, тянуть лист — панорама</span>
         </div>
-        <div id="viewport"><img id="drawing" alt="размеченный чертёж"></div>
+        <div id="viewport"><div id="canvas"><img id="drawing" alt="размеченный чертёж"><div id="labels"></div></div></div>
         <div id="draw-none" class="hint" hidden>Размеченного чертежа ещё нет.</div>
       </div>
 

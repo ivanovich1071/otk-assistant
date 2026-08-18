@@ -10,6 +10,7 @@ model: sonnet
 
 ## Правила, обязательные к прочтению
 
+- `.claude/rules/sheet-zones.md`
 - `.claude/rules/numbering.md`
 - `.claude/rules/glossary.md`
 - `.claude/rules/tt-rules.md`

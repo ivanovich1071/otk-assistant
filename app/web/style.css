@@ -109,7 +109,21 @@ td { padding: 3px 8px; border-bottom: 1px solid #ededed; vertical-align: top; }
   cursor: grab;
 }
 #viewport.drag { cursor: grabbing; }
+#canvas { position: relative; width: max-content; }
 #drawing { display: block; transform-origin: 0 0; image-rendering: auto; }
+
+/* Слой номеров поверх чертежа: сам номер уже впечатан в картинку, а эта метка
+   ловит мышь и показывает, куда он переедет после перерисовки. */
+#labels { position: absolute; inset: 0; pointer-events: none; }
+#labels .pin {
+  position: absolute; pointer-events: auto; cursor: move;
+  font: 700 11px/1 "Segoe UI", sans-serif; color: #c00000;
+  background: rgba(255, 255, 255, .82); border: 1px solid #c00000;
+  border-radius: 2px; padding: 1px 3px; white-space: nowrap;
+  transform: translate(-2px, -2px);
+}
+#labels .pin.low { border-color: #b78600; color: #8a6500; background: #fff6d8; }
+#labels .pin.moved { background: #c00000; color: #fff; }
 
 #editor table { margin-bottom: 10px; }
 #editor .gname {
