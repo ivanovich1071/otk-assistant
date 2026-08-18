@@ -24,6 +24,9 @@ TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "karta_obmera.
 ROW_HEADER, ROW_GROUP, ROW_DATA = 0, 1, 2
 FRAME_HEIGHT_PT = 13     # высота вставляемой рамки допуска ≈ строка текста
 TECH_GROUP = "Технические требования чертежа"
+# Параметры зубчатого венца обмеряются наравне с диаметрами, поэтому идут
+# в карту отдельной секцией, а не выбрасываются вместе со служебными таблицами.
+PARAM_GROUP = "Параметры зубчатого венца"
 
 
 def _clone(table, model_index: int):
@@ -89,12 +92,14 @@ def build(markup: dict, out: Path, template: Path = TEMPLATE) -> int:
                 _set(row.cells[1], item.get("value", ""))
             rows += 1
 
-    tech = markup.get("tech_requirements") or []
-    if tech:
+    for section, lines in ((PARAM_GROUP, markup.get("parameters")),
+                           (TECH_GROUP, markup.get("tech_requirements"))):
+        if not lines:
+            continue
         row = _clone(table, ROW_GROUP)
-        _set(row.cells[1], TECH_GROUP)
+        _set(row.cells[1], section)
         rows += 1
-        for line in tech:
+        for line in lines:
             row = _clone(table, ROW_DATA)
             _set(row.cells[0], line.get("no", "") if isinstance(line, dict) else "")
             _set(row.cells[1], line["text"] if isinstance(line, dict) else str(line))

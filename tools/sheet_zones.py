@@ -24,6 +24,7 @@ from detect_text import binarize, estimate_text_height, load_gray, remove_long_l
 
 MM = 300 / 25.4                 # пикселей в миллиметре при 300 dpi
 STAMP_W_MM, STAMP_H_MM = 185.0, 55.0
+EXTRA_W_MM, EXTRA_H_MM = 75.0, 18.0
 
 FRAME_COVER = 0.55              # линия рамки тянется хотя бы на столько листа
 MIN_CELL_MM = 4.0               # ячейка мельче — это не таблица, а шум
@@ -266,7 +267,58 @@ def stamp_rect(frame: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
     return (int(x1 - STAMP_W_MM * MM), int(y1 - STAMP_H_MM * MM), int(x1), int(y1))
 
 
-def analyze(gray: np.ndarray) -> dict:
+def extra_rect(frame: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Графа обозначения по ГОСТ 2.104 — левый верхний угол рамки.
+
+    На листах горизонтального формата обозначение повторяют здесь, повёрнутым
+    на 180°. Детектор читает его как обычную надпись, и на «Станине» обрывки
+    `KBZ536-1` и `6-11-001 СБ` уходили в карту обмера размерами.
+    """
+    x0, y0, _, _ = frame
+    return (int(x0), int(y0), int(x0 + EXTRA_W_MM * MM), int(y0 + EXTRA_H_MM * MM))
+
+
+def leader_ratios(lines: np.ndarray, blocks: list[dict],
+                  pitch: float) -> dict[int, float]:
+    """Во сколько раз линия под надписью длиннее самой надписи.
+
+    Номер позиции по ГОСТ 2.109 стоит на полке-выноске — коротком отрезке чуть
+    шире самого номера. Размерное число стоит на размерной линии, которая тянется
+    на всю измеряемую длину. Это их и разделяет: полка около двух ширин,
+    размерная линия — от трёх и больше.
+
+    Надписи без линии под ними в ответ не попадают: у них признака нет.
+    """
+    height, width = lines.shape
+    reach = max(4, int(pitch * 0.8))
+    out: dict[int, float] = {}
+    for block in blocks:
+        if block["angle"] != 0:
+            continue
+        top = min(height - 1, block["y"] + block["h"])
+        band = lines[top:min(height, top + reach), :]
+        if band.size == 0:
+            continue
+        centre = block["x"] + block["w"] // 2
+        # Мерить надо одну строку пикселей, а не всю полосу: полки соседних
+        # выносок стоят на разной высоте, и объединение по полосе сшивало их
+        # в одну длинную линию — номера позиций 67…71 проходили как размеры.
+        row = next((r for r in range(band.shape[0])
+                    if band[r, max(0, centre - 3):centre + 4].any()), None)
+        if row is None:
+            continue
+        profile = (band[max(0, row - 1):row + 2] > 0).any(axis=0)
+        left = right = centre
+        while left > 0 and profile[left - 1]:
+            left -= 1
+        while right < width - 1 and profile[right + 1]:
+            right += 1
+        out[block["id"]] = round((right - left) / max(block["w"], 1), 2)
+    return out
+
+
+def analyze(gray: np.ndarray, blocks: list[dict] | None = None,
+            pitch: float | None = None) -> dict:
     bw = binarize(gray)
     text_h = estimate_text_height(bw)
     _, lines = remove_long_lines(bw, max(24, int(text_h * 2.2)))
@@ -277,13 +329,17 @@ def analyze(gray: np.ndarray) -> dict:
     # это клетки, нарезанные размерными линиями, а не таблица.
     tables = [t for t in find_tables(lines, text_h)
               if not any(_covers(p, t) for p in projections)]
-    return {
+    result = {
         "text_height": round(text_h, 1),
         "frame": list(frame),
         "stamp": list(stamp),
+        "extra": list(extra_rect(frame)),
         "tables": [list(t) for t in tables],
         "projections": [list(p) for p in projections],
     }
+    if blocks:
+        result["leader"] = leader_ratios(lines, blocks, pitch or text_h)
+    return result
 
 
 def inside(box: tuple[int, int, int, int], zone: list[int], part: float = 0.6) -> bool:
@@ -302,8 +358,11 @@ def draw_debug(gray: np.ndarray, zones: dict, out: Path) -> None:
     cv2.rectangle(canvas, (x0, y0), (x1, y1), (255, 0, 0), 4)
     for table in zones["tables"]:
         cv2.rectangle(canvas, (table[0], table[1]), (table[2], table[3]), (0, 160, 0), 4)
-    s = zones["stamp"]
-    cv2.rectangle(canvas, (s[0], s[1]), (s[2], s[3]), (0, 0, 255), 4)
+    for name in ("stamp", "extra"):
+        s = zones[name]
+        cv2.rectangle(canvas, (s[0], s[1]), (s[2], s[3]), (0, 0, 255), 4)
+    for box in zones.get("text", []):
+        cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), (200, 0, 200), 4)
     ok, buf = cv2.imencode(".png", canvas)
     if ok:
         out.parent.mkdir(parents=True, exist_ok=True)

@@ -27,6 +27,23 @@ MARKUP_RULES = ["numbering.md", "glossary.md", "tt-rules.md", "markup-format.md"
 
 RECHECK_SCALE = 5          # во сколько раз увеличить кроп при перепроверке
 RECHECK_LIMIT = 12         # больше сомнительных — значит, дело не в отдельных надписях
+STAMP_SCALE = 2            # штамп крупный сам по себе, хватает двукратного
+
+# Типы документа из графы 1, при которых лист — сборка, а не деталь.
+ASSEMBLY_TYPES = ("сборочный", "габаритный", "монтажный")
+
+
+def is_assembly(stamp: dict) -> bool:
+    """Сборочный чертёж: по типу документа или по суффиксу обозначения.
+
+    На сборке размеры нумеруются, а номера позиций деталей — нет, поэтому
+    признак нужен до разметки.
+    """
+    kind = (stamp.get("doc_type") or "").strip().lower()
+    if any(word in kind for word in ASSEMBLY_TYPES):
+        return True
+    designation = (stamp.get("designation") or "").strip().upper()
+    return designation.endswith(" СБ") or designation.endswith("СБ")
 
 
 def _prompt(name: str, rules: list[str] = ()) -> str:
@@ -68,6 +85,41 @@ def read_sheets(llm: LLM, sheets: list[dict], sheets_dir: Path,
     return texts
 
 
+def read_stamp(llm: LLM, image: Path, zones: dict, progress=None) -> dict:
+    """Основная надпись одним запросом по кропу.
+
+    Зона штампа отсчитана от рамки чертежа, поэтому кроп попадает в неё и на
+    сканах с произвольными полями. Раньше шапка карты оставалась пустой,
+    а файл назывался по имени исходника.
+    """
+    import sys
+    sys.path.insert(0, str(ROOT / "tools"))
+    import crop                                     # noqa: PLC0415
+
+    x0, y0, x1, y1 = zones["stamp"]
+    piece = crop.cut(crop.load_gray(image), (x0, y0, x1 - x0, y1 - y0),
+                     pad=0, scale=STAMP_SCALE)
+    path = image.parent / "stamp.png"
+    crop.save(path, piece)
+
+    try:
+        answer = parse_json(llm.ask(_prompt("stamp.md"),
+                                    "Верни JSON-объект с графами штампа.",
+                                    images=[path]))
+    except (LLMError, ValueError) as error:
+        if progress:
+            progress(f"штамп не прочитан: {error}")
+        return {}
+    if not isinstance(answer, dict):
+        return {}
+
+    stamp = {key: str(answer.get(key, "")).strip()
+             for key in ("designation", "title", "doc_type", "material", "mass", "scale")}
+    if progress:
+        progress(f"штамп: {stamp['designation']} {stamp['title']}".strip())
+    return stamp
+
+
 def _blocks_digest(blocks: list[dict], texts: dict[int, dict]) -> list[dict]:
     out = []
     for block in blocks:
@@ -83,7 +135,7 @@ def _blocks_digest(blocks: list[dict], texts: dict[int, dict]) -> list[dict]:
 
 def plan_markup(blocks: list[dict], texts: dict[int, dict],
                 width: int, height: int, text_height: float,
-                zones: dict | None = None) -> dict:
+                zones: dict | None = None, assembly: bool = False) -> dict:
     """Группы и нумерация считаются кодом.
 
     Просить это у модели одним запросом пробовали: на 117 надписях она израсходовала
@@ -95,7 +147,7 @@ def plan_markup(blocks: list[dict], texts: dict[int, dict],
     import markup_layout                            # noqa: PLC0415
 
     return markup_layout.build(blocks, texts, width, height, text_height,
-                               zones=zones)
+                               zones=zones, assembly=assembly)
 
 
 def recheck(llm: LLM, markup: dict, image: Path, index: dict[int, dict],
@@ -198,7 +250,9 @@ def run(image: Path, blocks_data: dict, sheets: list[dict], sheets_dir: Path,
         sys.path.insert(0, str(ROOT / "tools"))
         import sheet_zones                          # noqa: PLC0415
         from detect_text import load_gray           # noqa: PLC0415
-        zones = sheet_zones.analyze(load_gray(image))
+        import markup_layout                        # noqa: PLC0415
+        pitch = markup_layout.line_height(blocks, blocks_data["text_height"])
+        zones = sheet_zones.analyze(load_gray(image), blocks, pitch)
         if progress:
             progress(f"служебных зон: таблиц {len(zones['tables'])}, "
                      f"проекций {len(zones['projections'])}")
@@ -206,11 +260,19 @@ def run(image: Path, blocks_data: dict, sheets: list[dict], sheets_dir: Path,
         if progress:
             progress(f"зоны листа не определены ({error}) — отбор по краю листа")
 
+    stamp = read_stamp(llm, image, zones, progress) if zones else {}
+    assembly = is_assembly(stamp)
+    if assembly and progress:
+        progress("сборочный чертёж — номера позиций деталей не нумеруются")
+
     markup = plan_markup(blocks, texts, blocks_data["width"],
-                         blocks_data["height"], blocks_data["text_height"], zones)
+                         blocks_data["height"], blocks_data["text_height"],
+                         zones, assembly)
     markup["drawing"] = str(image)
     markup["text_height"] = blocks_data["text_height"]
-    markup.setdefault("designation", "")
-    markup.setdefault("title", "")
+    markup["stamp"] = stamp
+    markup["assembly"] = assembly
+    markup["designation"] = stamp.get("designation", "")
+    markup["title"] = stamp.get("title", "")
     recheck(llm, markup, image, index, progress)
     return markup, llm
