@@ -22,6 +22,10 @@ from app import jobs, runner, settings    # noqa: E402
 from app.runner import rebuild, run       # noqa: E402
 
 WEB = Path(__file__).resolve().parent / "web"
+# Самый тяжёлый файл архива — 17,9 МБ. Двадцать даёт запас и отсекает
+# случайную заливку чего-то постороннего.
+MAX_UPLOAD = 20 * 1024 * 1024
+
 app = FastAPI(title="Ассистент ОТК", docs_url=None, redoc_url=None)
 
 
@@ -98,6 +102,10 @@ async def job_create(background: BackgroundTasks, mode: str = Form(...),
     data = await file.read()
     if not data:
         raise HTTPException(400, "пустой файл")
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(
+            413, f"файл {len(data) / 1e6:.1f} МБ, больше предельных "
+                 f"{MAX_UPLOAD // 1024 // 1024} МБ. Разделите комплект на части")
     job = jobs.create(mode, Path(file.filename or "чертёж.pdf").name, data)
     background.add_task(run, job.id)
     return _view(job)
@@ -124,6 +132,9 @@ def job_export(job_id: str) -> dict:
     if job is None:
         raise HTTPException(404, "задание не найдено")
     folder = settings.output_dir()
+    if job.folder:              # лист комплекта кладётся в его подпапку
+        folder = folder / job.folder
+        folder.mkdir(parents=True, exist_ok=True)
     saved = []
     for name in job.files:
         source = job.dir / "out" / name
@@ -148,6 +159,7 @@ def job_restart(job_id: str, background: BackgroundTasks) -> dict:
         raise HTTPException(404, "задание не найдено")
     job.stages, job.files, job.warnings, job.error = [], [], [], ""
     job.status = "queued"
+    job.cancel_flag.unlink(missing_ok=True)
     job.save()
     background.add_task(run, job.id)
     return _view(job)
@@ -159,6 +171,12 @@ def job_delete(job_id: str) -> JSONResponse:
     job = jobs.load(job_id)
     if job is None:
         raise HTTPException(404, "задание не найдено")
+    # Лист комплекта берёт исходник из папки родителя — осиротевший лист
+    # уже не пересчитать, поэтому комплект удаляется вместе с листами.
+    for child in jobs.listing():
+        if child.parent == job_id:
+            child.cancel()
+            shutil.rmtree(child.dir, ignore_errors=True)
     shutil.rmtree(job.dir, ignore_errors=True)
     return JSONResponse({"ok": True})
 
@@ -186,6 +204,77 @@ def job_view(job_id: str, name: str) -> FileResponse:
     """Просмотр: то же самое, но открывается прямо в окне."""
     _, path = _job_file(job_id, name)
     return FileResponse(path)
+
+
+@app.get("/api/jobs/{job_id}/sheets")
+def job_sheets(job_id: str) -> dict:
+    """Оглавление комплекта вместе с состоянием заданий по листам."""
+    job = jobs.load(job_id)
+    if job is None:
+        raise HTTPException(404, "задание не найдено")
+    path = job.dir / "sheets.json"
+    if not path.exists():
+        raise HTTPException(404, "это задание не комплект")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    children = {c.page: c for c in jobs.listing() if c.parent == job_id}
+    for sheet in data["sheets"]:
+        child = children.get(sheet["page"])
+        sheet["job"] = ({"id": child.id, "status": child.status,
+                         "title": child.title, "elapsed": child.elapsed}
+                        if child else None)
+    return data
+
+
+@app.post("/api/jobs/{job_id}/split")
+async def job_split(job_id: str, request: Request,
+                    background: BackgroundTasks) -> dict:
+    """Завести задания по отмеченным листам комплекта.
+
+    Листы считаются по одному: Starlette выполняет фоновые задачи запроса
+    последовательно, и это ровно то, что нужно — конвейер упирается в процессор.
+    """
+    job = jobs.load(job_id)
+    if job is None:
+        raise HTTPException(404, "задание не найдено")
+    path = job.dir / "sheets.json"
+    if not path.exists():
+        raise HTTPException(400, "это задание не комплект")
+
+    body = await request.json()
+    wanted = [int(n) for n in body.get("pages", [])]
+    if not wanted:
+        raise HTTPException(400, "не отмечено ни одного листа")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    index = {s["page"]: s for s in data["sheets"]}
+    exists = {c.page for c in jobs.listing() if c.parent == job_id}
+    folder = runner.safe_name(Path(job.source).stem)
+
+    job.cancel_flag.unlink(missing_ok=True)
+    created = []
+    for page in sorted(set(wanted)):
+        sheet = index.get(page)
+        if sheet is None or page in exists:
+            continue
+        title = f"{sheet['designation']} {sheet['title']}".strip()
+        child = jobs.create_child(job, page, title, folder)
+        background.add_task(run, child.id)
+        created.append(child.id)
+    return {"created": created, "folder": folder}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def job_cancel(job_id: str) -> dict:
+    """Прервать задание, а у комплекта — и все его листы, что ещё в очереди."""
+    job = jobs.load(job_id)
+    if job is None:
+        raise HTTPException(404, "задание не найдено")
+    stopped = []
+    for target in [job] + [c for c in jobs.listing() if c.parent == job_id]:
+        if target.status in ("queued", "running"):
+            target.cancel()
+            stopped.append(target.id)
+    return {"stopped": stopped}
 
 
 @app.get("/api/jobs/{job_id}/markup")

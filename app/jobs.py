@@ -19,7 +19,7 @@ JOBS_DIR = ROOT / "work" / "jobs"
 
 MODES = {"karta": "Карта обмера", "tz": "Требования по изготовлению"}
 STATUS = {"queued": "в очереди", "running": "выполняется",
-          "done": "готово", "failed": "ошибка"}
+          "done": "готово", "failed": "ошибка", "cancelled": "прервано"}
 
 # Обработчик пишет журнал стадий, а интерфейс опрашивает его раз в секунду —
 # оба в одном процессе. Без замка читатель успевал попасть между обрезкой файла
@@ -62,6 +62,12 @@ class Job:
     source: str
     title: str = ""
     status: str = "queued"
+    # Комплект: у листа стоит номер страницы и ссылка на задание-комплект,
+    # исходный PDF лежит у родителя и второй раз не копируется.
+    page: int = 0
+    parent: str = ""
+    folder: str = ""
+    sheets: int = 0
     created: float = field(default_factory=time.time)
     started: float = 0.0
     finished: float = 0.0
@@ -111,6 +117,37 @@ class Job:
         self.save()
 
     @property
+    def cancel_flag(self) -> Path:
+        return self.dir / "cancel"
+
+    def cancel(self) -> None:
+        """Просьба остановиться.
+
+        Файлом, а не полем: её ставит поток интерфейса, а читает поток
+        обработки, и переживать перезапуск приложения она тоже должна.
+        """
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.cancel_flag.write_text("", encoding="utf-8")
+        if self.status == "queued":
+            self.status = "cancelled"
+            self.finished = time.time()
+            self.save()
+
+    @property
+    def cancelled(self) -> bool:
+        return self.cancel_flag.exists()
+
+    def stop(self) -> None:
+        """Отметить задание прерванным. Уже готовые файлы остаются."""
+        for item in self.stages:
+            if item.status == "running":
+                item.status = "failed"
+                item.note = "прервано"
+        self.status = "cancelled"
+        self.finished = time.time()
+        self.save()
+
+    @property
     def elapsed(self) -> float:
         """Фактическое время обработки, в секундах."""
         if not self.started:
@@ -124,6 +161,20 @@ def create(mode: str, filename: str, data: bytes) -> Job:
     job.dir.mkdir(parents=True, exist_ok=True)
     (job.dir / "source" / filename).parent.mkdir(parents=True, exist_ok=True)
     (job.dir / "source" / filename).write_bytes(data)
+    job.save()
+    return job
+
+
+def create_child(parent: Job, page: int, title: str = "", folder: str = "") -> Job:
+    """Задание по одному листу комплекта.
+
+    Исходник не копируется: 40 листов одного файла — это 40 копий по 17 МБ.
+    Лист берётся из PDF родителя по номеру страницы.
+    """
+    job = Job(id=uuid.uuid4().hex[:12], mode=parent.mode, source=parent.source,
+              title=title or f"{parent.title} — лист {page}",
+              page=page, parent=parent.id, folder=folder)
+    job.dir.mkdir(parents=True, exist_ok=True)
     job.save()
     return job
 

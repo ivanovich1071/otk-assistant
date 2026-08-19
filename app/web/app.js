@@ -1,12 +1,15 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const STATUS = { queued: "в очереди", running: "выполняется", done: "готово", failed: "ошибка" };
+const STATUS = { queued: "в очереди", running: "выполняется", done: "готово",
+                 failed: "ошибка", cancelled: "прервано" };
 
 let chosen = null;      // выбранный файл
 let current = null;     // id открытого задания
 let job = null;         // карточка открытого задания
 let markup = null;      // разметка, загруженная в редактор
+let sheets = null;      // оглавление комплекта
+let picked = new Set(); // отмеченные листы комплекта
 let dirty = false;      // есть несохранённые правки
 let timer = null;       // опрос состояния
 let tick = null;        // живой счётчик времени
@@ -124,12 +127,18 @@ async function open(id, keep) {
   fillFiles();
   $("restart").disabled = false;
   $("remove").disabled = false;
+  $("cancel").disabled = !(job.status === "running" || job.status === "queued");
+
+  const komplekt = job.sheets > 0;
+  document.querySelector('.tab[data-tab="sheets"]').hidden = !komplekt;
 
   liveTimer();
   if (changed) {
-    markup = null; dirty = false;
+    markup = null; sheets = null; picked = new Set(); dirty = false;
     showTab("job");
     if (!keep) $("right").scrollTop = 0;
+  } else if (komplekt && !$("pane-sheets").hidden) {
+    loadSheets();
   }
 }
 
@@ -170,9 +179,10 @@ function showTab(name) {
   for (const tab of document.querySelectorAll(".tab")) {
     tab.classList.toggle("act", tab.dataset.tab === name);
   }
-  for (const pane of ["job", "draw", "table", "files"]) {
+  for (const pane of ["job", "sheets", "draw", "table", "files"]) {
     $("pane-" + pane).hidden = pane !== name;
   }
+  if (name === "sheets") loadSheets();
   if (name === "draw") loadDrawing();
   if (name === "table") loadMarkup();
 }
@@ -180,6 +190,110 @@ function showTab(name) {
 for (const tab of document.querySelectorAll(".tab")) {
   tab.onclick = () => showTab(tab.dataset.tab);
 }
+
+// ── листы комплекта ───────────────────────────────────────────────────────────
+
+const KIND = { spec: "спецификация", drawing: "чертёж" };
+
+/** «≈ 32 мин» — оценка грубая, поэтому без секунд и без точности до минуты. */
+function about(seconds) {
+  if (seconds < 90) return "≈ 1 мин";
+  if (seconds < 3600) return `≈ ${Math.round(seconds / 60)} мин`;
+  return `≈ ${(seconds / 3600).toFixed(1)} ч`;
+}
+
+async function loadSheets() {
+  const data = await api(`/api/jobs/${job.id}/sheets`).catch(() => null);
+  if (!data) return;
+  const firstTime = sheets === null;
+  sheets = data;
+  if (firstTime) {
+    picked = new Set(data.sheets.filter((s) => s.suggest && !s.job).map((s) => s.page));
+  }
+  drawSheets();
+}
+
+function drawSheets() {
+  const body = $("sheets").querySelector("tbody");
+  body.innerHTML = "";
+  for (const sheet of sheets.sheets) {
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    // Спецификация в карту обмера не идёт совсем, а лист, по которому задание
+    // уже заведено, второй раз не считаем.
+    box.disabled = sheet.kind === "spec" || Boolean(sheet.job);
+    box.checked = picked.has(sheet.page) && !box.disabled;
+    box.onchange = () => {
+      if (box.checked) picked.add(sheet.page); else picked.delete(sheet.page);
+      sheetTotals();
+    };
+
+    let state = "";
+    if (sheet.job) {
+      const link = document.createElement("a");
+      link.href = "#";
+      link.textContent = STATUS[sheet.job.status] || sheet.job.status;
+      link.onclick = (e) => { e.preventDefault(); open(sheet.job.id); };
+      state = link;
+    }
+
+    const kind = sheet.kind === "spec" ? KIND.spec
+               : (sheet.continuation ? "продолжение" : KIND.drawing);
+    const page = sheet.sheet && sheet.sheets ? ` (лист ${sheet.sheet} из ${sheet.sheets})` : "";
+    // Штамп не разобран — лист всё равно можно взять в работу, но подписать
+    // его нечем, и лучше сказать это прямо, чем показать пустую строку.
+    const named = sheet.stamp_ok === false ? "штамп не разобран" : sheet.designation;
+    const tr = row([box, sheet.page, sheet.format, kind,
+                    named, (sheet.title || "") + page,
+                    about(sheet.seconds), state],
+                   sheet.kind === "spec" || sheet.continuation ? "dim-row" : "");
+    body.appendChild(tr);
+  }
+  sheetTotals();
+}
+
+function sheetTotals() {
+  const chosenSheets = sheets.sheets.filter((s) => picked.has(s.page) && !s.job);
+  const seconds = chosenSheets.reduce((sum, s) => sum + s.seconds, 0);
+  const usd = chosenSheets.reduce((sum, s) => sum + s.usd, 0);
+  text($("sheet-total"), chosenSheets.length
+    ? `отмечено ${chosenSheets.length} — ${about(seconds)}, ≈ $${usd.toFixed(2)}`
+    : "листы не отмечены");
+  $("split").disabled = chosenSheets.length === 0;
+}
+
+$("pick-suggested").onclick = () => {
+  if (!sheets) return;
+  picked = new Set(sheets.sheets.filter((s) => s.suggest && !s.job).map((s) => s.page));
+  drawSheets();
+};
+
+$("pick-none").onclick = () => { picked = new Set(); drawSheets(); };
+
+$("split").onclick = async () => {
+  if (!sheets) return;
+  const pages = sheets.sheets.filter((s) => picked.has(s.page) && !s.job).map((s) => s.page);
+  const seconds = sheets.sheets.filter((s) => pages.includes(s.page))
+                               .reduce((sum, s) => sum + s.seconds, 0);
+  if (pages.length > 10 && !confirm(
+        `Отмечено листов: ${pages.length}. Это примерно ${about(seconds).slice(2)} `
+        + "непрерывной работы.
+Запустить?")) return;
+  $("split").disabled = true;
+  try {
+    await api(`/api/jobs/${job.id}/split`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pages }),
+    });
+    picked = new Set();
+    await refresh();
+    await loadSheets();
+  } catch (error) {
+    alert("Не удалось завести задания: " + error.message);
+    $("split").disabled = false;
+  }
+};
 
 // ── просмотр чертежа ──────────────────────────────────────────────────────────
 
@@ -510,6 +624,13 @@ $("restart").onclick = async () => {
   await refresh();
 };
 
+$("cancel").onclick = async () => {
+  if (!current) return;
+  const answer = await api(`/api/jobs/${current}/cancel`, { method: "POST" });
+  text($("stat-time"), `прервано заданий: ${answer.stopped.length}`);
+  await refresh();
+};
+
 $("remove").onclick = async () => {
   if (!current) return;
   await api("/api/jobs/" + current, { method: "DELETE" });
@@ -518,6 +639,7 @@ $("remove").onclick = async () => {
   $("detail").hidden = false;
   $("restart").disabled = true;
   $("remove").disabled = true;
+  $("cancel").disabled = true;
   await refresh();
 };
 

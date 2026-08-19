@@ -22,6 +22,7 @@
   <button id="start" disabled>Обработать</button>
   <span class="sep"></span>
   <button id="restart" disabled>Повторить</button>
+  <button id="cancel" disabled>Прервать</button>
   <button id="remove" disabled>Удалить</button>
   <button id="clear">Очистить список</button>
   <span class="grow"></span>
@@ -46,6 +47,7 @@
     <div id="card" hidden>
       <div id="tabs">
         <button class="tab act" data-tab="job">Задание</button>
+        <button class="tab" data-tab="sheets" hidden>Листы</button>
         <button class="tab" data-tab="draw">Чертёж</button>
         <button class="tab" data-tab="table">Карта обмера</button>
         <button class="tab" data-tab="files">Файлы</button>
@@ -61,6 +63,25 @@
         </table>
         <div class="caption">Замечания</div>
         <ul id="warnings" class="warn"></ul>
+      </div>
+
+      <div class="pane" id="pane-sheets" hidden>
+        <div id="sheetbar">
+          <button id="pick-suggested">Отметить предложенные</button>
+          <button id="pick-none">Снять всё</button>
+          <span class="grow"></span>
+          <span id="sheet-total" class="dim"></span>
+          <button id="split" disabled>Разбить на листы</button>
+        </div>
+        <table id="sheets">
+          <thead><tr>
+            <th style="width:34px"></th><th style="width:44px">№</th>
+            <th style="width:70px">Формат</th><th style="width:110px">Тип</th>
+            <th style="width:30%">Обозначение</th><th>Наименование</th>
+            <th style="width:90px">Оценка</th><th style="width:110px">Задание</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
 
       <div class="pane" id="pane-draw" hidden>

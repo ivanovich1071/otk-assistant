@@ -48,7 +48,7 @@ WHOLE_SHEET = 0.8               # сгусток крупнее этой дол�
 BIGGER_THAN_TABLE = 3.0         # проекция должна быть настолько крупнее таблицы
 
 
-def _long_runs(mask: np.ndarray, axis: int, cover: float) -> list[int]:
+def long_runs(mask: np.ndarray, axis: int, cover: float) -> list[int]:
     """Координаты линий, тянущихся вдоль всего листа."""
     counts = (mask > 0).sum(axis=axis)
     limit = mask.shape[axis] * cover
@@ -86,10 +86,10 @@ def find_frame(lines: np.ndarray) -> tuple[int, int, int, int]:
     """
     height, width = lines.shape
     bridge = max(3, int(FRAME_BRIDGE_MM * MM))
-    columns = _long_runs(
+    columns = long_runs(
         cv2.morphologyEx(lines, cv2.MORPH_CLOSE, np.ones((bridge, 1), np.uint8)),
         0, FRAME_COVER)
-    rows = _long_runs(
+    rows = long_runs(
         cv2.morphologyEx(lines, cv2.MORPH_CLOSE, np.ones((1, bridge), np.uint8)),
         1, FRAME_COVER)
 

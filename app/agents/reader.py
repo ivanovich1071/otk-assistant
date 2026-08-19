@@ -91,6 +91,33 @@ def read_sheets(llm: LLM, sheets: list[dict], sheets_dir: Path,
     return texts
 
 
+STAMP_FIELDS = ("designation", "title", "doc_type", "material", "mass",
+                "scale", "sheet", "sheets")
+
+
+def read_stamp_image(llm: LLM, path: Path, progress=None) -> dict:
+    """Графы основной надписи по готовому кропу штампа.
+
+    Отдельно от `read_stamp`, потому что оглавление комплекта берёт штамп
+    вырезкой прямо из PDF по ГОСТ 2.104 и целый лист не рендерит.
+    """
+    try:
+        answer = parse_json(llm.ask(_prompt("stamp.md"),
+                                    "Верни JSON-объект с графами штампа.",
+                                    images=[path]))
+    except (LLMError, ValueError) as error:
+        if progress:
+            progress(f"штамп не прочитан: {error}")
+        return {}
+    if not isinstance(answer, dict):
+        return {}
+
+    stamp = {key: str(answer.get(key, "")).strip() for key in STAMP_FIELDS}
+    if progress:
+        progress(f"штамп: {stamp['designation']} {stamp['title']}".strip())
+    return stamp
+
+
 def read_stamp(llm: LLM, image: Path, zones: dict, progress=None) -> dict:
     """Основная надпись одним запросом по кропу.
 
@@ -107,23 +134,7 @@ def read_stamp(llm: LLM, image: Path, zones: dict, progress=None) -> dict:
                      pad=0, scale=STAMP_SCALE)
     path = image.parent / "stamp.png"
     crop.save(path, piece)
-
-    try:
-        answer = parse_json(llm.ask(_prompt("stamp.md"),
-                                    "Верни JSON-объект с графами штампа.",
-                                    images=[path]))
-    except (LLMError, ValueError) as error:
-        if progress:
-            progress(f"штамп не прочитан: {error}")
-        return {}
-    if not isinstance(answer, dict):
-        return {}
-
-    stamp = {key: str(answer.get(key, "")).strip()
-             for key in ("designation", "title", "doc_type", "material", "mass", "scale")}
-    if progress:
-        progress(f"штамп: {stamp['designation']} {stamp['title']}".strip())
-    return stamp
+    return read_stamp_image(llm, path, progress)
 
 
 def _blocks_digest(blocks: list[dict], texts: dict[int, dict]) -> list[dict]:
