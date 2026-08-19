@@ -277,8 +277,7 @@ $("split").onclick = async () => {
                                .reduce((sum, s) => sum + s.seconds, 0);
   if (pages.length > 10 && !confirm(
         `Отмечено листов: ${pages.length}. Это примерно ${about(seconds).slice(2)} `
-        + "непрерывной работы.
-Запустить?")) return;
+        + "непрерывной работы.\nЗапустить?")) return;
   $("split").disabled = true;
   try {
     await api(`/api/jobs/${job.id}/split`, {

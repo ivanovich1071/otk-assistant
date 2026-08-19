@@ -36,10 +36,15 @@ def index() -> str:
 
 @app.get("/static/{name}")
 def static(name: str) -> FileResponse:
+    """Свои же CSS и JS.
+
+    Без кэша: приложение локальное, экономить нечего, а обновлённый файл,
+    застрявший в кэше окна, стоит часа поисков несуществующей ошибки.
+    """
     path = WEB / name
     if not path.exists() or path.parent != WEB:
         raise HTTPException(404, "нет такого файла")
-    return FileResponse(path)
+    return FileResponse(path, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/state")
