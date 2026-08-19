@@ -132,7 +132,7 @@ def run_karta(job: Job) -> None:
     (job.dir / "blocks.json").write_text(
         json.dumps(blocks, ensure_ascii=False, indent=1), encoding="utf-8")
     job.finish("Поиск надписей",
-               f"блоков {len(blocks['blocks'])}, высота шрифта ~{blocks['text_height']} px")
+               f"блоков {len(blocks['blocks'])}, кегль ~{blocks['pitch']} px")
 
     job.start("Контактные листы")
     gray = crop.load_gray(image)
@@ -148,7 +148,8 @@ def run_karta(job: Job) -> None:
             def note(line: str) -> None:
                 job.stage("Чтение и разметка").note = line
                 job.save()
-            markup, llm = read_drawing(image, blocks, sheets, job.dir / "sheets", note)
+            markup, llm = read_drawing(image, blocks, sheets, job.dir / "sheets", note,
+                                       hint=Path(job.source).stem)
         except Exception as error:                  # noqa: BLE001
             job.warnings.append(
                 f"Чтение надписей не выполнено: {error}. Контактные листы готовы "

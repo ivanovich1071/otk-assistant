@@ -25,8 +25,18 @@ from detect_text import binarize, estimate_text_height, load_gray, remove_long_l
 MM = 300 / 25.4                 # пикселей в миллиметре при 300 dpi
 STAMP_W_MM, STAMP_H_MM = 185.0, 55.0
 EXTRA_W_MM, EXTRA_H_MM = 75.0, 18.0
+MARGIN_OUT_MM, MARGIN_IN_MM = 12.0, 3.0
+# Поля рамки по ГОСТ 2.301: 20 мм под подшивку слева, 5 мм с трёх сторон.
+FIELD_LEFT_MM, FIELD_MM = 20.0, 5.0
+FRAME_TOLERANCE_MM = 10.0       # дальше от норматива — находка не рамка, а помеха
 
 FRAME_COVER = 0.55              # линия рамки тянется хотя бы на столько листа
+FRAME_BRIDGE_MM = 40.0          # разрыв в выцветшей линии рамки, который сшиваем
+SPEC_MIN_LINES = 3              # столько разделителей колонок делают спецификацию
+SPEC_MIN_ROWS = 3               # столько строк подряд над штампом — уже таблица
+SPEC_ROW_COVER = 0.6            # какую долю полосы занимает линия строки
+SPEC_ROW_GAP = 3.0              # разрыв между строками таблицы, в кеглях
+SPEC_MIN_H_MM = 15.0            # полоса ниже этой — не спецификация, а линия штампа
 MIN_CELL_MM = 4.0               # ячейка мельче — это не таблица, а шум
 TABLE_ROWS = 3                  # столько ячеек друг над другом уже таблица
 BORDER_BAND = 10                # в такой полосе вокруг края ищем линию рамки таблицы
@@ -55,18 +65,47 @@ def _long_runs(mask: np.ndarray, axis: int, cover: float) -> list[int]:
     return groups
 
 
+def gost_frame(width: int, height: int) -> tuple[int, int, int, int]:
+    """Рамка по ГОСТ 2.301, отсчитанная от края листа.
+
+    Лист мы рендерим из PDF сами и знаем, что 300 dpi — значит страница и есть
+    формат. Это опора на случай, когда линию рамки на скане не видно.
+    """
+    return (int(FIELD_LEFT_MM * MM), int(FIELD_MM * MM),
+            int(width - 1 - FIELD_MM * MM), int(height - 1 - FIELD_MM * MM))
+
+
 def find_frame(lines: np.ndarray) -> tuple[int, int, int, int]:
-    """Рамка чертежа: (x0, y0, x1, y1). Если не нашлась — весь лист."""
+    """Рамка чертежа: (x0, y0, x1, y1).
+
+    Линию рамки ищем по маске, замкнутой вдоль своей оси: на выцветшем скане
+    она рвётся, и ни один столбец пикселей не набирает нужного покрытия.
+    На «Колесе тяговом» левая линия сплошная только в верхней половине листа —
+    35 % при пороге 55 %, — и рамкой оказывался весь лист вместе с полями.
+    Найденное сверяем с ГОСТ 2.301: чего не видно, берём по нормативу.
+    """
     height, width = lines.shape
-    columns = _long_runs(lines, 0, FRAME_COVER)
-    rows = _long_runs(lines, 1, FRAME_COVER)
-    x0 = columns[0] if columns else 0
-    x1 = columns[-1] if len(columns) > 1 else width - 1
-    y0 = rows[0] if rows else 0
-    y1 = rows[-1] if len(rows) > 1 else height - 1
-    if x1 - x0 < width * 0.5 or y1 - y0 < height * 0.5:
-        return 0, 0, width - 1, height - 1
-    return int(x0), int(y0), int(x1), int(y1)
+    bridge = max(3, int(FRAME_BRIDGE_MM * MM))
+    columns = _long_runs(
+        cv2.morphologyEx(lines, cv2.MORPH_CLOSE, np.ones((bridge, 1), np.uint8)),
+        0, FRAME_COVER)
+    rows = _long_runs(
+        cv2.morphologyEx(lines, cv2.MORPH_CLOSE, np.ones((1, bridge), np.uint8)),
+        1, FRAME_COVER)
+
+    fallback = gost_frame(width, height)
+    found = (columns[0] if columns else None,
+             rows[0] if rows else None,
+             columns[-1] if len(columns) > 1 else None,
+             rows[-1] if len(rows) > 1 else None)
+
+    limit = FRAME_TOLERANCE_MM * MM
+    frame = tuple(int(value) if value is not None and abs(value - default) <= limit
+                  else default
+                  for value, default in zip(found, fallback))
+    if frame[2] - frame[0] < width * 0.5 or frame[3] - frame[1] < height * 0.5:
+        return fallback
+    return frame
 
 
 def find_tables(lines: np.ndarray, text_h: float) -> list[tuple[int, int, int, int]]:
@@ -267,15 +306,137 @@ def stamp_rect(frame: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
     return (int(x1 - STAMP_W_MM * MM), int(y1 - STAMP_H_MM * MM), int(x1), int(y1))
 
 
-def extra_rect(frame: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
-    """Графа обозначения по ГОСТ 2.104 — левый верхний угол рамки.
+def extra_rects(frame: tuple[int, int, int, int]) -> list[tuple[int, int, int, int]]:
+    """Графы обозначения по ГОСТ 2.104 — верхние углы рамки.
 
-    На листах горизонтального формата обозначение повторяют здесь, повёрнутым
-    на 180°. Детектор читает его как обычную надпись, и на «Станине» обрывки
-    `KBZ536-1` и `6-11-001 СБ` уходили в карту обмера размерами.
+    Обозначение чертежа повторяют в дополнительной графе: на горизонтальном
+    листе — в левом верхнем углу, повёрнутым на 180°; на вертикальном —
+    в правом верхнем, повёрнутым на 90°. Детектор читает их как обычные
+    надписи: на «Станине» так уходили в карту обрывки `KBZ536-1`, на «Колесе
+    тяговом» — `1-3653.00СБ` и `501-.`.
+
+    Ориентацию листа не угадываем — закрываем оба угла: графа занимает
+    считанные сантиметры, и настоящих размеров там не ставят.
     """
-    x0, y0, _, _ = frame
-    return (int(x0), int(y0), int(x0 + EXTRA_W_MM * MM), int(y0 + EXTRA_H_MM * MM))
+    x0, y0, x1, _ = frame
+    return [
+        (int(x0), int(y0), int(x0 + EXTRA_W_MM * MM), int(y0 + EXTRA_H_MM * MM)),
+        (int(x1 - EXTRA_H_MM * MM), int(y0), int(x1), int(y0 + EXTRA_W_MM * MM)),
+    ]
+
+
+def margin_rect(frame: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Колонка дополнительных граф вдоль левого края рамки.
+
+    «Инв. № подл.», «Подп. и дата», «Взам. инв. №» — по ГОСТ 2.104 они стоят
+    полосой шириной 12 мм и написаны боком. Полоса лежит слева от линии рамки,
+    но значения граф на неё наползают, поэтому проверкой «надпись вне рамки»
+    они не отсекались: `001160` приходило в карту позицией.
+
+    Внутрь рамки полоса заходит всего на 3 мм: на «Станине» размер `15,5` стоит
+    в 13 мм от рамки, и полоса пошире съедала бы его. Вдобавок отсекается только
+    повёрнутая надпись — графы пишут боком, размеры нет.
+    """
+    x0, y0, _, y1 = frame
+    return (int(x0 - MARGIN_OUT_MM * MM), int(y0),
+            int(x0 + MARGIN_IN_MM * MM), int(y1))
+
+
+def _spec_by_rows(band: np.ndarray, pitch: float) -> int | None:
+    """Верх спецификации по горизонтальным линиям строк.
+
+    Строки таблицы идут ровной стопкой прямо на штампе. Считаем линией ряд,
+    заполненный чернилами почти на всю ширину полосы, и поднимаемся от штампа
+    вверх, пока следующая линия недалеко.
+    """
+    wide = cv2.morphologyEx(band, cv2.MORPH_CLOSE,
+                            np.ones((1, max(3, int(pitch * 1.5))), np.uint8))
+    rows = np.where((wide > 0).mean(axis=1) >= SPEC_ROW_COVER)[0]
+    if not len(rows):
+        return None
+
+    levels: list[int] = []
+    for y in rows:
+        if levels and y - levels[-1] <= 5:
+            continue                       # толстая линия — тот же ряд
+        levels.append(int(y))
+
+    top, kept = band.shape[0], 0
+    for y in reversed(levels):
+        if top - y > pitch * SPEC_ROW_GAP:
+            break
+        top, kept = y, kept + 1
+    return top if kept >= SPEC_MIN_ROWS else None
+
+
+def _spec_by_dividers(band: np.ndarray, pitch: float) -> int | None:
+    """Верх спецификации по вертикальным разделителям колонок.
+
+    Запасной путь для сканов, где горизонтальные линии строк выцвели: на «Колесе
+    тяговом» их видно две из десяти, зато семь разделителей колонок целы и все
+    обрываются на одном уровне. Берём уровень, до которого дотянулись хотя бы
+    три разделителя, — одиночная линия бывает и краем чертежа.
+    """
+    # Скан «ведёт»: линия длиной в сантиметры уходит вбок на несколько пикселей,
+    # и по одному столбцу она не читается. Размазываем поперёк.
+    band = cv2.dilate(band, np.ones((1, max(3, int(pitch * 0.3))), np.uint8))
+    # Верх штампа посчитан по ГОСТ от рамки и на пару миллиметров не совпадает
+    # с нарисованным. Подставляем снизу полоску «чернил», чтобы разделитель,
+    # оборвавшийся чуть выше, всё равно считался доходящим до штампа.
+    tol = int(pitch * 2)
+    band = np.vstack([band, np.full((tol, band.shape[1]), 255, np.uint8)])
+    bridge = max(3, int(pitch * 1.5))
+    closed = cv2.morphologyEx(band, cv2.MORPH_CLOSE, np.ones((bridge, 1), np.uint8)) > 0
+
+    # Длина сплошного хвоста в каждом столбце: разворачиваем и ищем первый разрыв.
+    flipped = closed[::-1]
+    runs = np.argmax(~flipped, axis=0)
+    runs = np.where(flipped.all(axis=0), flipped.shape[0], runs) - tol
+
+    hits = np.where(runs >= SPEC_MIN_H_MM * MM)[0]
+    if not len(hits):
+        return None
+
+    tops: list[int] = []
+    column: list[int] = []
+    for i in hits:
+        if column and i - column[-1] > pitch:
+            tops.append(int(runs[column].max()))
+            column = []
+        column.append(i)
+    tops.append(int(runs[column].max()))
+
+    if len(tops) < SPEC_MIN_LINES:
+        return None
+    tops.sort(reverse=True)
+    return int(band.shape[0] - tol - tops[SPEC_MIN_LINES - 1])
+
+
+def spec_rect(lines: np.ndarray, stamp: tuple[int, int, int, int],
+              pitch: float) -> tuple[int, int, int, int] | None:
+    """Спецификация на листе — полоса над штампом той же ширины.
+
+    По ГОСТ 2.106 её графы повторяют ширину основной надписи, 185 мм, и стоят
+    прямо на ней. Сеткой ячеек её не находит `find_tables`: на скане рвутся
+    то горизонтальные линии строк, то вертикальные разделители колонок. Поэтому
+    ищем двумя способами и верим тому, который нашёл структуру, а не обрывок.
+    """
+    x0, stamp_top, x1, _ = stamp
+    band = lines[:max(0, stamp_top), max(0, x0):x1]
+    if band.size == 0:
+        return None
+
+    top = _spec_by_rows(band, pitch)
+    if top is None:
+        top = _spec_by_dividers(band, pitch)
+    if top is None or stamp_top - top < SPEC_MIN_H_MM * MM:
+        return None
+    return (int(x0), int(top), int(x1), int(stamp_top))
+
+
+def extra_rect(frame: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Совместимость: первый из прямоугольников `extra_rects`."""
+    return extra_rects(frame)[0]
 
 
 def leader_ratios(lines: np.ndarray, blocks: list[dict],
@@ -313,7 +474,10 @@ def leader_ratios(lines: np.ndarray, blocks: list[dict],
             left -= 1
         while right < width - 1 and profile[right + 1]:
             right += 1
-        out[block["id"]] = round((right - left) / max(block["w"], 1), 2)
+        # Делим на ширину надписи, но не меньше кегля: одиночная «1» вдвое уже
+        # двузначного номера, и на той же полке давала вдвое больший отношение —
+        # позиция 1 на «Колесе тяговом» так и уходила в карту размером.
+        out[block["id"]] = round((right - left) / max(block["w"], pitch, 1), 2)
     return out
 
 
@@ -329,11 +493,14 @@ def analyze(gray: np.ndarray, blocks: list[dict] | None = None,
     # это клетки, нарезанные размерными линиями, а не таблица.
     tables = [t for t in find_tables(lines, text_h)
               if not any(_covers(p, t) for p in projections)]
+    spec = spec_rect(lines, stamp, pitch or text_h)
     result = {
         "text_height": round(text_h, 1),
         "frame": list(frame),
         "stamp": list(stamp),
-        "extra": list(extra_rect(frame)),
+        "extra": [list(e) for e in extra_rects(frame)],
+        "margin": list(margin_rect(frame)),
+        "spec": list(spec) if spec else None,
         "tables": [list(t) for t in tables],
         "projections": [list(p) for p in projections],
     }
@@ -358,8 +525,10 @@ def draw_debug(gray: np.ndarray, zones: dict, out: Path) -> None:
     cv2.rectangle(canvas, (x0, y0), (x1, y1), (255, 0, 0), 4)
     for table in zones["tables"]:
         cv2.rectangle(canvas, (table[0], table[1]), (table[2], table[3]), (0, 160, 0), 4)
-    for name in ("stamp", "extra"):
-        s = zones[name]
+    boxes = [zones["stamp"], *zones.get("extra", [])]
+    if zones.get("spec"):
+        boxes.append(zones["spec"])
+    for s in boxes:
         cv2.rectangle(canvas, (s[0], s[1]), (s[2], s[3]), (0, 0, 255), 4)
     for box in zones.get("text", []):
         cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), (200, 0, 200), 4)
@@ -378,7 +547,8 @@ def main() -> None:
     gray = load_gray(args.image)
     zones = analyze(gray)
     print(json.dumps(zones, ensure_ascii=False))
-    print(f"рамка {zones['frame']}, таблиц {len(zones['tables'])}")
+    print(f"рамка {zones['frame']}, таблиц {len(zones['tables'])}, "
+          f"спецификация {zones['spec']}")
     if args.debug:
         draw_debug(gray, zones, args.debug)
         print(f"-> {args.debug}")

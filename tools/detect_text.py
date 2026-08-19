@@ -176,9 +176,120 @@ def _bbox(glyphs: list[tuple], idx: list[int]) -> tuple[int, int, int, int]:
     return min(xs), min(ys), max(xe) - min(xs), max(ye) - min(ys)
 
 
-def build_blocks(glyphs: list[tuple], text_h: float) -> list[Block]:
+def kegel(blocks: list[Block], text_h: float) -> float:
+    """Настоящая высота цифры на листе.
+
+    `estimate_text_height` берёт медиану по всем мелким компонентам, а в них
+    входят обломки штриховки и засечки: на «Колесе тяговом» она дала 31 px при
+    реальных 45. По этой заниженной оценке `_group` разрывал надписи там, где
+    разрыв между символами всего чуть шире обычного, — и `501-3653.01`
+    приходило в карту двумя позициями, а наклонный `Ø192*` — четырьмя.
+    """
+    tall = [b.h for b in blocks if b.h >= text_h]
+    return float(np.median(tall)) if tall else float(text_h)
+
+
+# Наклонную надпись — размер на выноске — детектор видит лесенкой из двух-четырёх
+# рамок: он знает только 0° и 90°, а цепочка по строке на склоне рвётся сдвигом
+# поперёк. Такие рамки заходят друг на друга, чего у соседних надписей не бывает.
+MERGE_GAP = 0.25             # зазор между рамками одной надписи, в кеглях
+MERGE_SPAN = 8.0             # склейка длиннее — уже не надпись, а полстроки
+# Поперёк строки надпись не растёт: даже на склоне лесенка из рамок укладывается
+# в три кегля. Без этого предела на «Колесе зубчатом» слипались четыре строки
+# таблицы параметров — а их карта разбирает построчно.
+MERGE_CROSS = 3.0
+CHAIN_SHARE = 0.5            # цепочка шире половины листа — точно не надпись
+MERGE_PASSES = 4             # больше сходящихся проходов склейка не требует
+
+
+def merge_overlapping(blocks: list[Block], pitch: float) -> list[Block]:
+    """Сцепляет рамки, наехавшие друг на друга, в одну надпись.
+
+    Проход повторяется: у наклонного `Ø492*` звёздочка стоит выше и правее
+    цифр и по отдельности не задевает ни одну из них — зато накрывает уже
+    собранную рамку всей надписи. За один проход этого не увидеть.
+    """
+    for _ in range(MERGE_PASSES):
+        merged = _merge_once(blocks, pitch)
+        if len(merged) == len(blocks):
+            return merged
+        blocks = merged
+    return blocks
+
+
+def _merge_once(blocks: list[Block], pitch: float) -> list[Block]:
+    tol = pitch * MERGE_GAP
+    parent = list(range(len(blocks)))
+    # Рамки, наложившиеся по обеим осям сразу, — точно одна надпись: у соседних
+    # размеров такого не бывает. Для них ограничение по высоте не действует:
+    # круто наклонённая надпись занимает больше трёх кеглей поперёк строки.
+    solid = [True] * len(blocks)
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for i, first in enumerate(blocks):
+        for j in range(i + 1, len(blocks)):
+            second = blocks[j]
+            over_x = min(first.x + first.w, second.x + second.w) - max(first.x, second.x)
+            over_y = min(first.y + first.h, second.y + second.h) - max(first.y, second.y)
+            # Одного касания мало: рядом стоящие размеры тоже почти соприкасаются.
+            # Нужно, чтобы по одной оси рамки честно перекрывались.
+            if over_x < -tol or over_y < -tol or max(over_x, over_y) <= 0:
+                continue
+            # Угол должен совпадать. Пробовали склеивать и разноориентированные
+            # куски — у `Ø492*` хвост `2*` детектор считает вертикальным, — но
+            # тогда на «Колесе зубчатом» слиплись два соседних вертикальных
+            # размера в один. Потерянная строка дороже лишней, правило осталось.
+            if first.angle != second.angle:
+                continue
+            ra, rb = find(i), find(j)
+            if ra != rb:
+                parent[rb] = ra
+            root = find(i)
+            solid[root] = solid[root] and min(over_x, over_y) > 0
+
+    families: dict[int, list[Block]] = {}
+    for index, block in enumerate(blocks):
+        families.setdefault(find(index), []).append(block)
+
+    out: list[Block] = []
+    for root, family in families.items():
+        if len(family) == 1:
+            out.append(family[0])
+            continue
+        x = min(b.x for b in family)
+        y = min(b.y for b in family)
+        w = max(b.x + b.w for b in family) - x
+        h = max(b.y + b.h for b in family) - y
+        along, cross = (w, h) if family[0].angle == 0 else (h, w)
+        if along > pitch * MERGE_SPAN or (cross > pitch * MERGE_CROSS
+                                          and not solid[root]):
+            out.extend(family)          # склеилось через полчертежа — не надпись
+            continue
+        out.append(Block(id=0, x=x, y=y, w=w, h=h, angle=family[0].angle,
+                         glyphs=sum(b.glyphs for b in family),
+                         ink=sum(b.ink for b in family)))
+
+    out.sort(key=lambda b: (b.y, b.x))
+    for n, b in enumerate(out, 1):
+        b.id = n
+    return out
+
+
+def build_blocks(glyphs: list[tuple], text_h: float,
+                 limit: float | None = None) -> list[Block]:
     """Каждый глиф попадает в ту цепочку — горизонтальную или вертикальную, —
-    где у него больше соседей. Одиночки остаются отдельными блоками (Ø, R, буквы видов)."""
+    где у него больше соседей. Одиночки остаются отдельными блоками (Ø, R, буквы видов).
+
+    `limit` — предел длины цепочки. По умолчанию тридцать кеглей: этого хватало,
+    пока кегль был занижен и строки распадались. С честным кеглем строка
+    технических требований набирает и сорок кеглей — предел задаёт лист.
+    """
+    limit = limit or text_h * 30
     h_groups = _group(glyphs, text_h, vertical=False)
     v_groups = _group(glyphs, text_h, vertical=True)
 
@@ -204,7 +315,7 @@ def build_blocks(glyphs: list[tuple], text_h: float) -> list[Block]:
         if all(glyphs[i][5] for i in idx):
             continue  # блок целиком из стрелок размерных линий
         x, y, w, h = _bbox(glyphs, idx)
-        if max(w, h) > text_h * 30:
+        if max(w, h) > limit:
             continue  # склейка через полчертежа — не надпись
         ink = sum(glyphs[i][4] for i in idx)
         blocks.append(
@@ -225,12 +336,17 @@ def detect(path: Path) -> dict:
     min_len = max(24, int(text_h * 2.2))
     mask, lines = remove_long_lines(bw, min_len)
     glyphs = find_glyphs(mask, lines, text_h)
-    blocks = build_blocks(glyphs, text_h)
+    # Первый проход нужен только затем, чтобы измерить кегль: сцепление символов
+    # в строку зависит от него, а оценка по компонентам его занижает.
+    pitch = kegel(build_blocks(glyphs, text_h), text_h)
+    limit = max(pitch * 30, gray.shape[1] * CHAIN_SHARE)
+    blocks = merge_overlapping(build_blocks(glyphs, pitch, limit), pitch)
     return {
         "image": str(path),
         "width": int(gray.shape[1]),
         "height": int(gray.shape[0]),
         "text_height": round(text_h, 1),
+        "pitch": round(pitch, 1),
         "glyphs": len(glyphs),
         "blocks": [asdict(b) for b in blocks],
     }

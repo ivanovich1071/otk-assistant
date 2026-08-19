@@ -24,7 +24,13 @@ VIEW_LETTER = re.compile(r"^[А-ЯA-Z]$")
 # Буква разреза бывает с индексом: «А₁—А₁». Индекс детектор видит цифрой.
 SECTION = re.compile(r"^([А-ЯA-Z]\d?)\s*[-–—]\s*\1$")
 SECTION_MARK = re.compile(r"^[А-ЯA-Z]\d?$")
+CAPTION_GAP = 4.0               # буква и её пара в заголовке стоят не дальше
 CALLOUT = re.compile(r"^([А-ЯA-Z])\s*\(\s*\d+\s*:\s*[\d,]+\s*\)$")
+# Масштаб проекции: `(1:1)`, `(2:1)`. Цифры в нём есть, но это не размер —
+# на «Колесе тяговом» обе выноски приходили в карту позициями 10 и 17.
+# Скобки обязательны: без них под маску попадает конусность `1:5` по ГОСТ 2.307,
+# а она как раз обмеряется.
+SCALE = re.compile(r"^\(\s*\d+\s*:\s*[\d,]+\s*\)$")
 # Детектор часто режет номер пункта в отдельный блок, поэтому после точки
 # может не быть ничего: «1.» — это тоже начало технического требования.
 NUMBERED_TT = re.compile(r"^\s*\d{1,2}\.(\s|$)")
@@ -57,6 +63,7 @@ MIN_IN_GROUP = 3                # группа из одного-двух раз
 TIER_DIAMETER, TIER_LINEAR, TIER_LAST = 0, 1, 2
 RADIUS = re.compile(r"^R[\d.,]", re.IGNORECASE)
 ROUGHNESS = re.compile(r"^R[az]\s", re.IGNORECASE)
+THREAD = re.compile(r"^M\s?\d")
 
 # Текстовая часть листа: несколько слов подряд в строку и несколько таких строк
 # друг под другом с одного отступа. Подобрано на «Станине КВ2536-11-001 СБ».
@@ -67,6 +74,7 @@ TEXT_PITCH = 2.5                # разрыв между строками аб�
 TEXT_INDENT = 2.5               # разброс левого края строк абзаца, в кеглях
 TEXT_RUN_WIDTH = 4.0            # строка уже этого — обрывок, а не текст
 TEXT_WIDE = 15.0                # такую длину размер не набирает — это фраза
+TEXT_BREAK = 6.0                # разрыв между абзацами одной текстовой части
 
 # Номера позиций деталей на сборочном чертеже. По ГОСТ 2.109 номер стоит на
 # полке-выноске, по ГОСТ 2.316 полки группируют в колонку или строчку.
@@ -84,18 +92,25 @@ def stamp_zone(width: int, height: int) -> tuple[float, float]:
             height - (MARGIN_MM + STAMP_H_MM) * MM)
 
 
-def line_height(blocks: list[dict], text_height: float) -> float:
+def line_height(blocks: list[dict], text_height: float,
+                pitch: float | None = None) -> float:
     """Кегль основного текста листа.
 
     Оценка детектора занижена — в неё входят обломки штриховки и засечки:
     на «Станине» она дала 36 px при реальной высоте цифры около 68. Медиана
     по блокам крупнее этой оценки и есть кегль.
+
+    Детектор теперь меряет кегль сам и кладёт в `blocks.json`: после склейки
+    наклонных надписей медиана по блокам завышена — склейка выше строки.
     """
+    if pitch:
+        return float(pitch)
     tall = [b["h"] for b in blocks if b["h"] >= text_height]
     return float(statistics.median(tall)) if tall else float(text_height)
 
 
-def _text_runs(blocks: list[dict], pitch: float) -> list[list[dict]]:
+def _text_runs(blocks: list[dict], pitch: float,
+               strict: bool = True) -> list[list[dict]]:
     """Связные отрезки строк: слова, стоящие подряд вплотную.
 
     Одной привязки по вертикали мало: на листе шириной девять тысяч пикселей
@@ -122,6 +137,8 @@ def _text_runs(blocks: list[dict], pitch: float) -> list[list[dict]]:
         if run:
             runs.append(run)
 
+    if not strict:
+        return runs
     # Слов в строке бывает и меньше четырёх: модель иногда возвращает половину
     # фразы одним блоком. Тогда строку выдаёт длина — размер её не набирает.
     return [r for r in runs
@@ -135,18 +152,33 @@ def _run_box(run: list[dict]) -> tuple[int, int, int, int]:
             max(b["x"] + b["w"] for b in run), max(b["y"] + b["h"] for b in run))
 
 
-def _service(box: tuple[int, int, int, int], zones: dict | None) -> bool:
-    """Абзац сидит в штампе или в графе обозначения — это не текст чертежа."""
+def extra_zones(zones: dict | None) -> list[list[int]]:
+    """Графы обозначения: их две — по числу верхних углов рамки."""
+    extra = (zones or {}).get("extra") or []
+    if extra and not isinstance(extra[0], (list, tuple)):
+        return [extra]                              # старый контракт: один прямоугольник
+    return [box for box in extra if box]
+
+
+def service_zones(zones: dict | None) -> list[list[int]]:
+    """Прямоугольники, содержимое которых в карту обмера не идёт никогда."""
     if not zones:
-        return False
+        return []
+    named = [zones.get(name) for name in ("stamp", "spec")]
+    return [box for box in [*named, *extra_zones(zones)] if box]
+
+
+def _service(box: tuple[int, int, int, int], zones: dict | None) -> bool:
+    """Абзац сидит в штампе, спецификации или графе обозначения — не текст чертежа."""
     import sheet_zones                              # noqa: PLC0415
     rect = (box[0], box[1], box[2] - box[0], box[3] - box[1])
-    return any(sheet_zones.inside(rect, zones[name], part=0.5)
-               for name in ("stamp", "extra") if zones.get(name))
+    return any(sheet_zones.inside(rect, zone, part=0.5)
+               for zone in service_zones(zones))
 
 
 def text_columns(blocks: list[dict], text_height: float,
-                 zones: dict | None = None) -> list[list[list[dict]]]:
+                 zones: dict | None = None,
+                 pitch: float | None = None) -> list[list[list[dict]]]:
     """Абзацы сплошного текста: технические требования и прочие надписи.
 
     Текст отличается от размеров не содержанием, а видом. Раньше блок ТТ искали
@@ -154,9 +186,10 @@ def text_columns(blocks: list[dict], text_height: float,
     не находился, и весь текст требований уходил в карту размерами. Геометрия
     от чтения не зависит.
     """
-    pitch = line_height(blocks, text_height)
+    pitch = line_height(blocks, text_height, pitch)
     columns: list[list[list[dict]]] = []
-    for run in sorted(_text_runs(blocks, pitch), key=lambda r: _run_box(r)[1]):
+    strict = _text_runs(blocks, pitch)
+    for run in sorted(strict, key=lambda r: _run_box(r)[1]):
         left, top, _, _ = _run_box(run)
         for column in columns:
             plast, _, _, pbottom = _run_box(column[-1])
@@ -166,17 +199,68 @@ def text_columns(blocks: list[dict], text_height: float,
                 break
         else:
             columns.append([run])
+    columns = _stitch_columns(columns, pitch)
+    loose = [r for r in _text_runs(blocks, pitch, strict=False) if r not in strict]
+    for column in columns:
+        _absorb(column, loose, pitch)
     return [c for c in columns
             if len(c) >= TEXT_LINES
             and not _service(_run_box([b for run in c for b in run]), zones)]
 
 
+def _absorb(column: list[list[dict]], loose: list[list[dict]], pitch: float) -> None:
+    """Дотягивает до абзаца короткие строки с его же отступа.
+
+    Первый пункт технических требований бывает коротким — «1 *Размер для
+    справок.» — и сам по себе на текст не тянет: по ширине он неотличим от
+    размера. Но стоит он на левом краю абзаца и в его же ритме строк, а такого
+    совпадения у размера не бывает.
+    """
+    while True:
+        x0, y0, x1, y1 = _run_box([b for run in column for b in run])
+        for run in loose:
+            rx0, ry0, rx1, ry1 = _run_box(run)
+            if abs(rx0 - x0) > pitch * TEXT_INDENT or min(x1, rx1) <= max(x0, rx0):
+                continue
+            if not (-pitch * TEXT_BREAK < ry0 - y1 < pitch * TEXT_BREAK
+                    or -pitch * TEXT_BREAK < y0 - ry1 < pitch * TEXT_BREAK):
+                continue
+            column.append(run)
+            loose.remove(run)
+            break
+        else:
+            return
+
+
+def _stitch_columns(columns: list[list[list[dict]]],
+                    pitch: float) -> list[list[list[dict]]]:
+    """Сшивает куски одного абзаца, разорванные подпунктами.
+
+    Технические требования — не сплошная лесенка строк: подпункты «— внешний
+    осмотр,» отбиты отступом, а последний абзац — пустой строкой. Разрывы
+    больше `TEXT_PITCH` рвали блок ТТ надвое, и хвост уходил в карту размерами.
+    Абзацы, стоящие друг под другом в одной колонке листа, — одна текстовая часть.
+    """
+    merged: list[list[list[dict]]] = []
+    for column in sorted(columns, key=lambda c: _run_box(c[0])[1]):
+        x0, y0, x1, _ = _run_box([b for run in column for b in run])
+        for other in merged:
+            ox0, _, ox1, oy1 = _run_box([b for run in other for b in run])
+            if min(x1, ox1) - max(x0, ox0) > 0 and 0 <= y0 - oy1 < pitch * TEXT_BREAK:
+                other.extend(column)
+                break
+        else:
+            merged.append(list(column))
+    return merged
+
+
 def text_zones(blocks: list[dict], text_height: float,
-               zones: dict | None = None) -> list[tuple[int, int, int, int]]:
-    pitch = line_height(blocks, text_height)
+               zones: dict | None = None,
+               pitch: float | None = None) -> list[tuple[int, int, int, int]]:
+    pitch = line_height(blocks, text_height, pitch)
     pad = int(pitch * 0.4)
     out = []
-    for column in text_columns(blocks, text_height, zones):
+    for column in text_columns(blocks, text_height, zones, pitch):
         flat = [b for run in column for b in run]
         x0, y0, x1, y1 = _run_box(flat)
         out.append((x0 - pad, y0 - pad, x1 + pad, y1 + pad))
@@ -193,9 +277,16 @@ def classify(block: dict, text: str, width: int, height: int,
     # буквенные обозначения видов, разрезов и поверхностей не нумеруются.
     # Хвост от стрелки взгляда модель дописывает к метке: «Б₁» приходит как
     # «D1—» или «D1\», поэтому кайма из штрихов снимается перед проверкой.
-    core = value.strip(" .,;:—–-\\/|_'\"")
-    if VIEW_LETTER.match(core) or SECTION.match(core) or CALLOUT.match(core) \
-            or SECTION_MARK.match(core):
+    # Скобка сюда же: заголовок «А (1:1)» детектор режет по пробелу, и первая
+    # половина приходит как «A (».
+    core = value.strip(" .,;:—–-\\/|_'\"()")
+    # `R1` и `M8` под маску метки разреза подходят, но это радиус и резьба.
+    # Буквенные обозначения по ГОСТ 2.316 — русские; латинские приходят от модели
+    # как похожие начертания, поэтому маску с них не снять, а исключения нужны.
+    dimension = RADIUS.match(core) or THREAD.match(core)
+    letter = (VIEW_LETTER.match(core) or SECTION.match(core)
+              or CALLOUT.match(core) or SECTION_MARK.match(core))
+    if (letter and not dimension) or SCALE.match(value):
         return "caption"
 
     box = (block["x"], block["y"], block["w"], block["h"])
@@ -205,7 +296,14 @@ def classify(block: dict, text: str, width: int, height: int,
         import sheet_zones                          # noqa: PLC0415
         if sheet_zones.inside(box, zones["stamp"]):
             return "stamp"
-        if zones.get("extra") and sheet_zones.inside(box, zones["extra"]):
+        # Спецификация по ГОСТ 2.106 — состав сборки, а не размеры детали.
+        if zones.get("spec") and sheet_zones.inside(box, zones["spec"]):
+            return "spec"
+        if any(sheet_zones.inside(box, zone) for zone in extra_zones(zones)):
+            return "extra"
+        # Колонка дополнительных граф пишется боком — этим и отличается
+        # от размера, который может стоять у самого края рамки.
+        if block["angle"] == 90 and zones.get("margin")                 and sheet_zones.inside(box, zones["margin"], part=0.5):
             return "extra"
         if any(sheet_zones.inside(box, table) for table in zones["tables"]):
             return "table"
@@ -388,10 +486,50 @@ def section_titles(blocks: list[dict], texts: dict[int, dict],
             right = (texts.get(second["id"]) or {}).get("text", "").strip()
             if not left or left != right or not SECTION_MARK.match(left):
                 continue
-            if second["x"] - (first["x"] + first["w"]) > pitch * 4:
+            if second["x"] - (first["x"] + first["w"]) > pitch * CAPTION_GAP:
                 continue
             out.append({
                 "id": first["id"], "text": f"{left}-{right}", "value": f"{left}-{right}",
+                "cx": (first["x"] + second["x"] + second["w"]) / 2,
+                "cy": first["y"] + first["h"] / 2,
+                "x": first["x"], "y": first["y"],
+                "w": second["x"] + second["w"] - first["x"], "h": first["h"],
+                "sure": True,
+            })
+    return out
+
+
+def callout_titles(blocks: list[dict], texts: dict[int, dict],
+                   pitch: float) -> list[dict]:
+    """Заголовки вида «А (1:1)»: буква и масштаб приходят разными блоками.
+
+    Между ними пробел шире межбуквенного, поэтому детектор их не сцепляет,
+    а поодиночке ни буква, ни масштаб на заголовок не тянут: буква — обозначение
+    поверхности, масштаб — просто цифры со скобками.
+    """
+    rows: list[list[dict]] = []
+    for block in sorted((b for b in blocks if b["angle"] == 0),
+                        key=lambda b: b["y"] + b["h"] / 2):
+        centre = block["y"] + block["h"] / 2
+        if rows and centre - (rows[-1][0]["y"] + rows[-1][0]["h"] / 2) < pitch * 0.6:
+            rows[-1].append(block)
+        else:
+            rows.append([block])
+
+    out = []
+    for row in rows:
+        line = sorted(row, key=lambda b: b["x"])
+        for first, second in zip(line, line[1:]):
+            letter = (texts.get(first["id"]) or {}).get("text", "").strip(" .,;:()")
+            scale = (texts.get(second["id"]) or {}).get("text", "").strip()
+            if not SECTION_MARK.match(letter) or not SCALE.match(scale):
+                continue
+            if second["x"] - (first["x"] + first["w"]) > pitch * CAPTION_GAP:
+                continue
+            scale = scale.strip("()")
+            out.append({
+                "id": first["id"], "text": f"{letter} ({scale})",
+                "value": f"{letter} ({scale})",
                 "cx": (first["x"] + second["x"] + second["w"]) / 2,
                 "cy": first["y"] + first["h"] / 2,
                 "x": first["x"], "y": first["y"],
@@ -414,8 +552,10 @@ def _caption_text(caption: dict) -> str:
     value = caption["text"].strip()
     if SECTION.match(value):
         return f"Разрез {value}"
-    if match := CALLOUT.match(value):
-        return f"Выноска {match.group(1)}"
+    if CALLOUT.match(value):
+        # Буква с масштабом бывает и выноской, и сечением. Не гадаем: в карту
+        # идёт ровно то, что написано на листе.
+        return value
     if VIEW_LETTER.match(value):
         return f"Вид {value}"
     return ""
@@ -509,12 +649,13 @@ def tech_items(columns: list[list[list[dict]]],
 
 def build(blocks: list[dict], texts: dict[int, dict], width: int, height: int,
           text_height: float, zones: dict | None = None,
-          assembly: bool = False) -> dict:
+          assembly: bool = False, pitch: float | None = None) -> dict:
     """Готовые группы с номерами и координатами."""
     sizes, captions, tech, skipped = [], [], [], []
     doubtful: set[int] = set()
-    columns = text_columns(blocks, text_height, zones)
-    boxes = text_zones(blocks, text_height, zones)
+    pitch = line_height(blocks, text_height, pitch)
+    columns = text_columns(blocks, text_height, zones, pitch)
+    boxes = text_zones(blocks, text_height, zones, pitch)
 
     for block in blocks:
         read = texts.get(block["id"])
@@ -561,7 +702,8 @@ def build(blocks: list[dict], texts: dict[int, dict], width: int, height: int,
     if projections:
         captions = [c for c in captions
                     if not any(_distance(c, p) == 0 for p in projections)]
-    captions += section_titles(blocks, texts, line_height(blocks, text_height))
+    captions += section_titles(blocks, texts, pitch)
+    captions += callout_titles(blocks, texts, pitch)
     names = name_groups(groups, captions)
     order_index = sorted(range(len(groups)),
                          key=lambda i: (sum(x["cy"] for x in groups[i]) / len(groups[i]) // 1200,
@@ -586,7 +728,6 @@ def build(blocks: list[dict], texts: dict[int, dict], width: int, height: int,
     items += [{"no": "", "text": e["value"]}
               for e in sorted(tech, key=lambda e: e["cy"]) if e["value"]]
 
-    pitch = line_height(blocks, text_height)
     parameters: list[dict] = []
     for table in parameter_tables(blocks, texts, zones):
         parameters += table_rows(blocks, texts, table, pitch)

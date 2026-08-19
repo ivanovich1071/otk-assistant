@@ -249,11 +249,21 @@ function drawPins() {
   placePins();
 }
 
+// Метка постоянного размера при отдалении закрывает на экране куда больше,
+// чем занимает на листе, — и садится поверх размера, рядом с которым стоит.
+// Поэтому она следует зуму, но не мельчает до нечитаемого.
+const PIN_MIN = 9, PIN_MAX = 16;
+
 function placePins() {
   for (const item of pinned()) {
     if (!item._pin) continue;
     item._pin.style.left = item.label_x * zoom + "px";
     item._pin.style.top = item.label_y * zoom + "px";
+    const drawn = (item.label_h || 0) - 4;
+    if (drawn > 0) {
+      const size = Math.min(PIN_MAX, Math.max(PIN_MIN, Math.round(drawn * zoom)));
+      item._pin.style.fontSize = size + "px";
+    }
   }
 }
 

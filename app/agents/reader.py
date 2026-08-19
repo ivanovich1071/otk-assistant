@@ -34,17 +34,22 @@ STAMP_SCALE = 2            # штамп крупный сам по себе, х�
 ASSEMBLY_TYPES = ("сборочный", "габаритный", "монтажный")
 
 
-def is_assembly(stamp: dict) -> bool:
-    """Сборочный чертёж: по типу документа или по суффиксу обозначения.
+def is_assembly(stamp: dict, hint: str = "", zones: dict | None = None) -> bool:
+    """Сборочный чертёж — по любому из четырёх признаков.
 
     На сборке размеры нумеруются, а номера позиций деталей — нет, поэтому
-    признак нужен до разметки.
+    признак нужен до разметки, и ошибиться в нём дорого: на «Колесе тяговом»
+    модель вернула пустое обозначение (кроп штампа был срезан кривой рамкой),
+    и четыре номера позиций ушли в карту размерами. Одного источника мало.
     """
     kind = (stamp.get("doc_type") or "").strip().lower()
     if any(word in kind for word in ASSEMBLY_TYPES):
         return True
-    designation = (stamp.get("designation") or "").strip().upper()
-    return designation.endswith(" СБ") or designation.endswith("СБ")
+    for name in ((stamp.get("designation") or ""), hint):
+        if name.strip().upper().replace(" ", "").endswith("СБ"):
+            return True
+    # Спецификация по ГОСТ 2.106 стоит над штампом только на сборочном чертеже.
+    return bool((zones or {}).get("spec"))
 
 
 def _prompt(name: str, rules: list[str] = ()) -> str:
@@ -136,7 +141,8 @@ def _blocks_digest(blocks: list[dict], texts: dict[int, dict]) -> list[dict]:
 
 def plan_markup(blocks: list[dict], texts: dict[int, dict],
                 width: int, height: int, text_height: float,
-                zones: dict | None = None, assembly: bool = False) -> dict:
+                zones: dict | None = None, assembly: bool = False,
+                pitch: float | None = None) -> dict:
     """Группы и нумерация считаются кодом.
 
     Просить это у модели одним запросом пробовали: на 117 надписях она израсходовала
@@ -148,7 +154,7 @@ def plan_markup(blocks: list[dict], texts: dict[int, dict],
     import markup_layout                            # noqa: PLC0415
 
     return markup_layout.build(blocks, texts, width, height, text_height,
-                               zones=zones, assembly=assembly)
+                               zones=zones, assembly=assembly, pitch=pitch)
 
 
 def recheck(llm: LLM, markup: dict, image: Path, index: dict[int, dict],
@@ -235,7 +241,7 @@ def build_markup(plan: dict, blocks: list[dict], drawing: Path,
 
 
 def run(image: Path, blocks_data: dict, sheets: list[dict], sheets_dir: Path,
-        progress=None) -> tuple[dict, LLM]:
+        progress=None, hint: str = "") -> tuple[dict, LLM]:
     llm = LLM()
     blocks = blocks_data["blocks"]
     index = {b["id"]: b for b in blocks}
@@ -252,25 +258,28 @@ def run(image: Path, blocks_data: dict, sheets: list[dict], sheets_dir: Path,
         import sheet_zones                          # noqa: PLC0415
         from detect_text import load_gray           # noqa: PLC0415
         import markup_layout                        # noqa: PLC0415
-        pitch = markup_layout.line_height(blocks, blocks_data["text_height"])
+        pitch = markup_layout.line_height(blocks, blocks_data["text_height"],
+                                          blocks_data.get("pitch"))
         zones = sheet_zones.analyze(load_gray(image), blocks, pitch)
         if progress:
             progress(f"служебных зон: таблиц {len(zones['tables'])}, "
-                     f"проекций {len(zones['projections'])}")
+                     f"проекций {len(zones['projections'])}"
+                     + (", спецификация найдена" if zones.get("spec") else ""))
     except Exception as error:                      # noqa: BLE001
         if progress:
             progress(f"зоны листа не определены ({error}) — отбор по краю листа")
 
     stamp = read_stamp(llm, image, zones, progress) if zones else {}
-    assembly = is_assembly(stamp)
+    assembly = is_assembly(stamp, hint, zones)
     if assembly and progress:
         progress("сборочный чертёж — номера позиций деталей не нумеруются")
 
     markup = plan_markup(blocks, texts, blocks_data["width"],
                          blocks_data["height"], blocks_data["text_height"],
-                         zones, assembly)
+                         zones, assembly, blocks_data.get("pitch"))
     markup["drawing"] = str(image)
     markup["text_height"] = blocks_data["text_height"]
+    markup["pitch"] = blocks_data.get("pitch")
     markup["stamp"] = stamp
     markup["assembly"] = assembly
     markup["designation"] = stamp.get("designation", "")
