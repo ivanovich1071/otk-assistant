@@ -475,7 +475,7 @@ docs/             описание проекта, инструкция, дор�
 .venv\Scripts\python.exe -m app.bench --gold tests\gold\5489.0123.0000.28
 
 # синтаксис интерфейса: разорванная строка в app.js гасит все кнопки разом
-node --check app\webpp.js
+node --check app\web\app.js
 
 # оглавление комплекта: типы листов бесплатно, со штампами — по $0,0016 за лист
 .venv\Scripts\python.exe tools\sheet_index.py "комплект.pdf" --no-stamps
